@@ -1,10 +1,13 @@
 import Matter from "matter-js";
 import GUI from "lil-gui";
 
-const { Engine, World, Bodies, Body, Runner, Events } = Matter;
+const { Engine, World, Bodies, Body, Runner, Events, Query } = Matter;
 
 const WALL_THICKNESS = 180;
 const OPTICAL_CIRCLE_SCALE = Math.sqrt(4 / Math.PI);
+const CATEGORY_WALL = 0x0001;
+const CATEGORY_SHAPE = 0x0002;
+const CATEGORY_ESCAPED = 0x0004;
 
 const DESKTOP = {
   shapeSize: 88,
@@ -41,6 +44,7 @@ const params = {
   shakeCooldown: 700,
   shakeSpawnCount: 4,
   maxShapes: 36,
+  flickEscapeSpeed: 7,
 };
 
 const canvas = document.getElementById("physics-canvas");
@@ -85,6 +89,15 @@ const shake = {
   hits: 0,
   windowStart: 0,
   lastSpawnAt: 0,
+};
+
+const drag = {
+  active: false,
+  shape: null,
+  pointerId: null,
+  offsetX: 0,
+  offsetY: 0,
+  samples: [],
 };
 
 const engine = Engine.create({
@@ -133,33 +146,43 @@ function rebuildBounds() {
   if (walls.length) World.remove(world, walls);
 
   // Closed box so shapes can roll around the full screen
+  const wallOptions = {
+    isStatic: true,
+    friction: 0.2,
+    restitution: 0.35,
+    collisionFilter: {
+      category: CATEGORY_WALL,
+      mask: CATEGORY_SHAPE,
+    },
+  };
+
   floor = Bodies.rectangle(
     width / 2,
     height + WALL_THICKNESS / 2 - 2,
     width + WALL_THICKNESS * 2,
     WALL_THICKNESS,
-    { isStatic: true, friction: 0.2, restitution: 0.35 }
+    wallOptions
   );
   ceiling = Bodies.rectangle(
     width / 2,
     -WALL_THICKNESS / 2 + 2,
     width + WALL_THICKNESS * 2,
     WALL_THICKNESS,
-    { isStatic: true, friction: 0.2, restitution: 0.35 }
+    wallOptions
   );
   leftWall = Bodies.rectangle(
     -WALL_THICKNESS / 2 + 2,
     height / 2,
     WALL_THICKNESS,
     height * 2,
-    { isStatic: true, friction: 0.2, restitution: 0.35 }
+    wallOptions
   );
   rightWall = Bodies.rectangle(
     width + WALL_THICKNESS / 2 - 2,
     height / 2,
     WALL_THICKNESS,
     height * 2,
-    { isStatic: true, friction: 0.2, restitution: 0.35 }
+    wallOptions
   );
 
   World.add(world, [floor, ceiling, leftWall, rightWall]);
@@ -180,6 +203,10 @@ function spawnShape(x, y, options = {}) {
     friction: params.friction,
     frictionAir: params.frictionAir,
     density: params.density,
+    collisionFilter: {
+      category: CATEGORY_SHAPE,
+      mask: CATEGORY_WALL | CATEGORY_SHAPE | CATEGORY_ESCAPED,
+    },
   };
 
   let body;
@@ -203,7 +230,121 @@ function spawnShape(x, y, options = {}) {
   }
 
   World.add(world, body);
-  shapes.push({ body, kind, size });
+  shapes.push({ body, kind, size, escaped: false });
+}
+
+function markEscaped(shape) {
+  if (!shape || shape.escaped) return;
+  shape.escaped = true;
+  shape.body.collisionFilter.category = CATEGORY_ESCAPED;
+  // Pass through walls; still bump other shapes a bit
+  shape.body.collisionFilter.mask = CATEGORY_SHAPE | CATEGORY_ESCAPED;
+}
+
+function removeShape(shape) {
+  const idx = shapes.indexOf(shape);
+  if (idx === -1) return;
+  World.remove(world, shape.body);
+  shapes.splice(idx, 1);
+}
+
+function removeOffscreenEscaped() {
+  const margin = params.shapeSize * 1.5;
+  for (let i = shapes.length - 1; i >= 0; i--) {
+    const shape = shapes[i];
+    if (!shape.escaped) continue;
+    const { x, y } = shape.body.position;
+    if (
+      x < -margin ||
+      x > width + margin ||
+      y < -margin ||
+      y > height + margin
+    ) {
+      removeShape(shape);
+    }
+  }
+}
+
+function findShapeAt(x, y) {
+  for (let i = shapes.length - 1; i >= 0; i--) {
+    const shape = shapes[i];
+    if (Query.point([shape.body], { x, y }).length) return shape;
+  }
+  return null;
+}
+
+function recordDragSample(x, y) {
+  const now = performance.now();
+  drag.samples.push({ x, y, t: now });
+  while (drag.samples.length > 6) drag.samples.shift();
+  while (drag.samples.length && now - drag.samples[0].t > 100) {
+    drag.samples.shift();
+  }
+}
+
+function dragVelocity() {
+  if (drag.samples.length < 2) return { x: 0, y: 0 };
+  const a = drag.samples[0];
+  const b = drag.samples[drag.samples.length - 1];
+  const dt = Math.max(16, b.t - a.t);
+  return {
+    x: ((b.x - a.x) / dt) * 16.67,
+    y: ((b.y - a.y) / dt) * 16.67,
+  };
+}
+
+function startDrag(shape, x, y, pointerId) {
+  drag.active = true;
+  drag.shape = shape;
+  drag.pointerId = pointerId;
+  drag.offsetX = shape.body.position.x - x;
+  drag.offsetY = shape.body.position.y - y;
+  drag.samples = [];
+  recordDragSample(x, y);
+  Body.setStatic(shape.body, true);
+  Body.setVelocity(shape.body, { x: 0, y: 0 });
+  Body.setAngularVelocity(shape.body, 0);
+}
+
+function moveDrag(x, y) {
+  if (!drag.active || !drag.shape) return;
+  const nx = x + drag.offsetX;
+  const ny = y + drag.offsetY;
+  Body.setPosition(drag.shape.body, { x: nx, y: ny });
+  recordDragSample(x, y);
+}
+
+function endDrag() {
+  if (!drag.active || !drag.shape) {
+    drag.active = false;
+    drag.shape = null;
+    drag.pointerId = null;
+    return;
+  }
+
+  const shape = drag.shape;
+  const vel = dragVelocity();
+  const throwVx = vel.x * 0.55;
+  const throwVy = vel.y * 0.55;
+  const speed = Math.hypot(throwVx, throwVy);
+
+  Body.setStatic(shape.body, false);
+  Body.setVelocity(shape.body, { x: throwVx, y: throwVy });
+  Body.setAngularVelocity(shape.body, (Math.random() - 0.5) * 0.2);
+
+  const { x, y } = shape.body.position;
+  const outside =
+    x < 0 || x > width || y < 0 || y > height;
+
+  // Only finger drag/flick can leave — tilt alone still hits walls
+  if (outside || speed >= params.flickEscapeSpeed) {
+    markEscaped(shape);
+  }
+
+  drag.active = false;
+  drag.shape = null;
+  drag.pointerId = null;
+  drag.samples = [];
 }
 
 function spawnShapesFromTop(count) {
@@ -482,6 +623,7 @@ function render() {
 Events.on(engine, "beforeUpdate", () => {
   updateGravity();
   applyAntiAlign();
+  removeOffscreenEscaped();
 });
 
 const runner = Runner.create();
@@ -605,13 +747,25 @@ async function enableTilt() {
   }
 }
 
+function canvasPointerPos(e) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: e.clientX - rect.left,
+    y: e.clientY - rect.top,
+  };
+}
+
 // enableBtn?.addEventListener("click", enableTilt);
 
-// Desktop / fallback: move pointer to lean gravity
 canvas.addEventListener(
   "pointermove",
   (e) => {
-    setTiltTargetsFromPointer(e.clientX, e.clientY);
+    const pos = canvasPointerPos(e);
+    if (drag.active && e.pointerId === drag.pointerId) {
+      moveDrag(pos.x, pos.y);
+    } else if (!drag.active) {
+      setTiltTargetsFromPointer(e.clientX, e.clientY);
+    }
     e.preventDefault();
   },
   { passive: false }
@@ -622,12 +776,29 @@ canvas.addEventListener(
   (e) => {
     // iOS needs a user gesture for sensor permission
     if (!usingDeviceTilt) enableTilt();
+
+    const pos = canvasPointerPos(e);
+    const hit = findShapeAt(pos.x, pos.y);
+
     canvas.setPointerCapture(e.pointerId);
-    setTiltTargetsFromPointer(e.clientX, e.clientY);
+
+    if (hit) {
+      startDrag(hit, pos.x, pos.y, e.pointerId);
+    } else {
+      setTiltTargetsFromPointer(e.clientX, e.clientY);
+    }
     e.preventDefault();
   },
   { passive: false }
 );
+
+canvas.addEventListener("pointerup", (e) => {
+  if (drag.active && e.pointerId === drag.pointerId) endDrag();
+});
+
+canvas.addEventListener("pointercancel", (e) => {
+  if (drag.active && e.pointerId === drag.pointerId) endDrag();
+});
 
 // If orientation exists and no iOS prompt needed, auto-hint
 function initTiltUi() {
