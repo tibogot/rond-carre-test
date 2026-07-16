@@ -13,8 +13,8 @@ const DESKTOP = {
 };
 
 const MOBILE = {
-  shapeSize: 64,
-  shapeCount: 8,
+  shapeSize: 88,
+  shapeCount: 14,
   circleSegments: 36,
 };
 
@@ -353,7 +353,7 @@ function drawTiltIndicator() {
 
 function render() {
   ctx.clearRect(0, 0, width, height);
-  drawTiltIndicator();
+  // drawTiltIndicator(); // orientation debug
   drawShapes();
 }
 
@@ -371,6 +371,7 @@ Runner.run(runner, engine);
 })();
 
 function setStatus(text, active = false) {
+  if (!statusEl) return;
   statusEl.hidden = !text;
   statusEl.textContent = text;
   statusEl.dataset.active = active ? "true" : "false";
@@ -456,26 +457,26 @@ async function enableTilt() {
     tilt.x = 0;
     tilt.y = 1;
 
-    enableBtn.hidden = true;
-    hintEl.hidden = true;
-    setStatus("Tilt actif — penche le téléphone", true);
+    // enableBtn.hidden = true;
+    // hintEl.hidden = true;
+    // setStatus("Tilt actif — penche le téléphone", true);
 
     // If nothing arrives, tell the user (common when sensors are blocked)
-    setTimeout(() => {
-      if (usingDeviceTilt && performance.now() - lastSensorAt > 1500) {
-        setStatus(
-          "Pas de capteur — autorise le mouvement dans Chrome (icône cadenas)",
-          false
-        );
-      }
-    }, 1600);
+    // setTimeout(() => {
+    //   if (usingDeviceTilt && performance.now() - lastSensorAt > 1500) {
+    //     setStatus(
+    //       "Pas de capteur — autorise le mouvement dans Chrome (icône cadenas)",
+    //       false
+    //     );
+    //   }
+    // }, 1600);
   } catch (err) {
-    setStatus("Tilt indisponible sur cet appareil");
+    // setStatus("Tilt indisponible sur cet appareil");
     console.warn(err);
   }
 }
 
-enableBtn.addEventListener("click", enableTilt);
+// enableBtn?.addEventListener("click", enableTilt);
 
 // Desktop / fallback: move pointer to lean gravity
 canvas.addEventListener(
@@ -490,6 +491,8 @@ canvas.addEventListener(
 canvas.addEventListener(
   "pointerdown",
   (e) => {
+    // iOS needs a user gesture for sensor permission
+    if (!usingDeviceTilt) enableTilt();
     canvas.setPointerCapture(e.pointerId);
     setTiltTargetsFromPointer(e.clientX, e.clientY);
     e.preventDefault();
@@ -499,6 +502,7 @@ canvas.addEventListener(
 
 // If orientation exists and no iOS prompt needed, auto-hint
 function initTiltUi() {
+  /*
   const needsPermission =
     typeof DeviceOrientationEvent !== "undefined" &&
     typeof DeviceOrientationEvent.requestPermission === "function";
@@ -515,11 +519,22 @@ function initTiltUi() {
   }
 
   if (!needsPermission && isMobile) {
-    // Android-like: can listen after interaction; still use the button for clarity
     hintEl.textContent = "Appuie pour activer le tilt, puis incline le téléphone";
   } else if (!isMobile) {
     hintEl.textContent =
       "Sur mobile: active le tilt. Sur desktop: déplace le curseur pour simuler.";
+  }
+  */
+
+  // Auto-enable when no iOS permission prompt is required (e.g. Android)
+  const needsPermission =
+    typeof DeviceOrientationEvent !== "undefined" &&
+    typeof DeviceOrientationEvent.requestPermission === "function";
+
+  if (!needsPermission) {
+    enableTilt();
+  } else {
+    tiltEnabled = true; // desktop cursor / wait for first tap on iOS
   }
 }
 
@@ -593,4 +608,4 @@ applyDeviceDefaults(true);
 resize();
 seedShapes();
 initTiltUi();
-setupGUI();
+// setupGUI(); // orientation / physics debug panel
