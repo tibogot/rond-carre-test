@@ -25,9 +25,10 @@ const params = {
   opticalCircleScale: OPTICAL_CIRCLE_SCALE,
   circleSegments: DESKTOP.circleSegments,
   color: "#ffd600",
-  baseGravity: 0.55,
-  tiltStrength: 1.35,
-  tiltSmooth: 0.12,
+  baseGravity: 0.85,
+  tiltStrength: 1.8,
+  tiltSmooth: 0.18,
+  tiltSensitivity: 18,
   restitution: 0.55,
   friction: 0.05,
   frictionAir: 0.008,
@@ -52,6 +53,16 @@ const shapes = [];
 const tilt = { x: 0, y: 1, targetX: 0, targetY: 1 };
 let tiltEnabled = false;
 let usingDeviceTilt = false;
+let sensorMode = "none"; // orientation | motion | none
+let lastSensorAt = 0;
+const preferMotion = /Android/i.test(navigator.userAgent);
+const calib = {
+  ready: false,
+  beta: 0,
+  gamma: 0,
+  ax: 0,
+  ay: 0,
+};
 
 const engine = Engine.create({
   gravity: { x: 0, y: params.baseGravity, scale: 0.001 },
@@ -186,11 +197,48 @@ function clamp(v, min, max) {
 }
 
 function setTiltTargetsFromOrientation(beta, gamma) {
-  // beta: front/back (-180..180), gamma: left/right (-90..90)
-  const x = clamp((gamma || 0) / 35, -1.5, 1.5);
-  const y = clamp((beta || 0) / 35, -1.5, 1.5);
-  tilt.targetX = x;
-  tilt.targetY = y;
+  // Relative to pose at activation — small leans from how you hold the phone
+  const b = beta ?? 0;
+  const g = gamma ?? 0;
+
+  if (!calib.ready) {
+    calib.beta = b;
+    calib.gamma = g;
+    calib.ready = true;
+  }
+
+  const db = b - calib.beta;
+  const dg = g - calib.gamma;
+  const sens = params.tiltSensitivity;
+
+  tilt.targetX = clamp(dg / sens, -1.6, 1.6);
+  // Keep screen-"down" as baseline, then add forward/back lean
+  tilt.targetY = clamp(1 + db / sens, -1.6, 1.6);
+  lastSensorAt = performance.now();
+}
+
+function setTiltTargetsFromMotion(ax, ay) {
+  // accelerationIncludingGravity — works more reliably on Android Chrome
+  if (!calib.ready) {
+    calib.ax = ax;
+    calib.ay = ay;
+    calib.ready = true;
+  }
+
+  const g = 9.81;
+  // Absolute device gravity projected on screen axes (portrait)
+  let x = ax / g;
+  let y = ay / g;
+
+  // If the signal is tiny, fall back to delta from calibration
+  if (Math.hypot(x, y) < 0.15) {
+    x = (ax - calib.ax) / g;
+    y = 1 + (ay - calib.ay) / g;
+  }
+
+  tilt.targetX = clamp(x * 1.15, -1.6, 1.6);
+  tilt.targetY = clamp(y * 1.15, -1.6, 1.6);
+  lastSensorAt = performance.now();
 }
 
 function setTiltTargetsFromPointer(clientX, clientY) {
@@ -209,9 +257,8 @@ function updateGravity() {
   if (usingDeviceTilt) {
     engine.gravity.x = tilt.x * params.tiltStrength;
     engine.gravity.y = tilt.y * params.tiltStrength;
-    // Avoid zero-g lock when the phone is perfectly flat
-    if (Math.hypot(engine.gravity.x, engine.gravity.y) < 0.15) {
-      engine.gravity.y = params.baseGravity * 0.35;
+    if (Math.hypot(engine.gravity.x, engine.gravity.y) < 0.2) {
+      engine.gravity.y = params.baseGravity;
     }
   } else if (params.useMouseTilt) {
     engine.gravity.x = tilt.x * params.tiltStrength;
@@ -324,9 +371,46 @@ function setStatus(text, active = false) {
 }
 
 function onDeviceOrientation(e) {
-  if (!usingDeviceTilt) return;
+  if (!usingDeviceTilt || preferMotion) return;
   if (e.beta == null && e.gamma == null) return;
+  if (sensorMode === "none" || sensorMode === "orientation") {
+    sensorMode = "orientation";
+    setTiltTargetsFromOrientation(e.beta, e.gamma);
+  }
+}
+
+function onDeviceOrientationAbsolute(e) {
+  if (!usingDeviceTilt || preferMotion) return;
+  if (e.beta == null && e.gamma == null) return;
+  if (sensorMode === "motion") return;
+  sensorMode = "orientation";
   setTiltTargetsFromOrientation(e.beta, e.gamma);
+}
+
+function onDeviceMotion(e) {
+  if (!usingDeviceTilt) return;
+  const acc = e.accelerationIncludingGravity;
+  if (!acc || (acc.x == null && acc.y == null)) return;
+
+  if (
+    !preferMotion &&
+    sensorMode === "orientation" &&
+    performance.now() - lastSensorAt < 200
+  ) {
+    return;
+  }
+
+  sensorMode = "motion";
+  setTiltTargetsFromMotion(acc.x || 0, acc.y || 0);
+}
+
+function attachSensors() {
+  window.addEventListener("deviceorientation", onDeviceOrientation);
+  window.addEventListener(
+    "deviceorientationabsolute",
+    onDeviceOrientationAbsolute
+  );
+  window.addEventListener("devicemotion", onDeviceMotion);
 }
 
 async function enableTilt() {
@@ -342,13 +426,43 @@ async function enableTilt() {
       }
     }
 
+    if (
+      typeof DeviceMotionEvent !== "undefined" &&
+      typeof DeviceMotionEvent.requestPermission === "function"
+    ) {
+      try {
+        await DeviceMotionEvent.requestPermission();
+      } catch (_) {
+        // iOS only; ignore on Android
+      }
+    }
+
+    calib.ready = false;
+    sensorMode = "none";
+    lastSensorAt = 0;
     usingDeviceTilt = true;
     tiltEnabled = true;
-    window.addEventListener("deviceorientation", onDeviceOrientation, true);
+    attachSensors();
+
+    // Start with a calm downward gravity until first sensor sample
+    tilt.targetX = 0;
+    tilt.targetY = 1;
+    tilt.x = 0;
+    tilt.y = 1;
 
     enableBtn.hidden = true;
     hintEl.hidden = true;
-    setStatus("Tilt actif — incline ton téléphone", true);
+    setStatus("Tilt actif — penche le téléphone", true);
+
+    // If nothing arrives, tell the user (common when sensors are blocked)
+    setTimeout(() => {
+      if (usingDeviceTilt && performance.now() - lastSensorAt > 1500) {
+        setStatus(
+          "Pas de capteur — autorise le mouvement dans Chrome (icône cadenas)",
+          false
+        );
+      }
+    }, 1600);
   } catch (err) {
     setStatus("Tilt indisponible sur cet appareil");
     console.warn(err);
@@ -440,10 +554,22 @@ function setupGUI() {
   shapesFolder.addColor(params, "color").name("Color");
 
   const tiltFolder = gui.addFolder("Tilt");
-  tiltFolder.add(params, "tiltStrength", 0.2, 3, 0.05).name("Tilt strength");
+  tiltFolder.add(params, "tiltStrength", 0.2, 4, 0.05).name("Tilt strength");
+  tiltFolder.add(params, "tiltSensitivity", 8, 40, 1).name("Sensitivity");
   tiltFolder.add(params, "tiltSmooth", 0.02, 0.4, 0.01).name("Smoothing");
   tiltFolder.add(params, "baseGravity", 0, 2, 0.05).name("Base gravity");
   tiltFolder.add(params, "useMouseTilt").name("Mouse tilt (desktop)");
+  tiltFolder
+    .add(
+      {
+        recalibrate: () => {
+          calib.ready = false;
+          setStatus("Recalibré — penche depuis cette position", true);
+        },
+      },
+      "recalibrate"
+    )
+    .name("Recalibrate");
 
   const physicsFolder = gui.addFolder("Physics");
   physicsFolder.add(params, "restitution", 0, 1, 0.01).name("Bounce");

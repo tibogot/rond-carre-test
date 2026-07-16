@@ -2,5 +2,16 @@
   "rewrites": [
     { "source": "/tilt", "destination": "/tilt.html" },
     { "source": "/gallery", "destination": "/gallery.html" }
+  ],
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        {
+          "key": "Permissions-Policy",
+          "value": "accelerometer=*, gyroscope=*, magnetometer=*"
+        }
+      ]
+    }
   ]
 }
