@@ -36,6 +36,11 @@ const params = {
   antiAlign: true,
   antiAlignTorque: 0.004,
   useMouseTilt: true,
+  shakeThreshold: 14,
+  shakeHitsNeeded: 2,
+  shakeCooldown: 850,
+  shakeSpawnCount: 4,
+  maxShapes: 36,
 };
 
 const canvas = document.getElementById("physics-canvas");
@@ -65,6 +70,18 @@ const calib = {
   gamma: 0,
   ax: 0,
   ay: 0,
+};
+
+const shake = {
+  lastX: 0,
+  lastY: 0,
+  lastZ: 0,
+  lastGX: 0,
+  lastGY: 0,
+  lastGZ: 0,
+  hits: 0,
+  windowStart: 0,
+  lastSpawnAt: 0,
 };
 
 const engine = Engine.create({
@@ -151,10 +168,11 @@ function sizeForKind(kind) {
     : params.shapeSize;
 }
 
-function spawnShape(x, y) {
+function spawnShape(x, y, options = {}) {
+  const { fromTop = false } = options;
   const kind = Math.random() < params.circleRatio ? "circle" : "square";
   const size = sizeForKind(kind);
-  const options = {
+  const bodyOptions = {
     restitution: params.restitution,
     friction: params.friction,
     frictionAir: params.frictionAir,
@@ -163,19 +181,92 @@ function spawnShape(x, y) {
 
   let body;
   if (kind === "circle") {
-    body = Bodies.circle(x, y, size / 2, options, params.circleSegments);
+    body = Bodies.circle(x, y, size / 2, bodyOptions, params.circleSegments);
   } else {
-    body = Bodies.rectangle(x, y, size, size, options);
+    body = Bodies.rectangle(x, y, size, size, bodyOptions);
     Body.setAngle(body, Math.random() * Math.PI * 2);
   }
 
-  Body.setVelocity(body, {
-    x: (Math.random() - 0.5) * 1.5,
-    y: (Math.random() - 0.5) * 1.5,
-  });
+  if (fromTop) {
+    Body.setVelocity(body, {
+      x: (Math.random() - 0.5) * 2,
+      y: 1 + Math.random() * 2,
+    });
+  } else {
+    Body.setVelocity(body, {
+      x: (Math.random() - 0.5) * 1.5,
+      y: (Math.random() - 0.5) * 1.5,
+    });
+  }
 
   World.add(world, body);
   shapes.push({ body, kind, size });
+}
+
+function spawnShapesFromTop(count) {
+  const n = Math.min(count, Math.max(0, params.maxShapes - shapes.length));
+  for (let i = 0; i < n; i++) {
+    const size = sizeForKind("circle");
+    const x = size / 2 + 8 + Math.random() * Math.max(1, width - size - 16);
+    const y = -size - 20 - Math.random() * 120;
+    spawnShape(x, y, { fromTop: true });
+  }
+}
+
+function detectShake(e) {
+  if (!usingDeviceTilt) return;
+
+  const now = performance.now();
+  const acc = e.acceleration;
+  const ag = e.accelerationIncludingGravity;
+
+  let dx = 0;
+  let dy = 0;
+  let dz = 0;
+
+  // Prefer acceleration without gravity when the browser provides it
+  if (acc && (acc.x != null || acc.y != null || acc.z != null)) {
+    const x = acc.x || 0;
+    const y = acc.y || 0;
+    const z = acc.z || 0;
+    dx = x - shake.lastX;
+    dy = y - shake.lastY;
+    dz = z - shake.lastZ;
+    shake.lastX = x;
+    shake.lastY = y;
+    shake.lastZ = z;
+  } else if (ag && (ag.x != null || ag.y != null || ag.z != null)) {
+    const x = ag.x || 0;
+    const y = ag.y || 0;
+    const z = ag.z || 0;
+    dx = x - shake.lastGX;
+    dy = y - shake.lastGY;
+    dz = z - shake.lastGZ;
+    shake.lastGX = x;
+    shake.lastGY = y;
+    shake.lastGZ = z;
+  } else {
+    return;
+  }
+
+  const magnitude = Math.abs(dx) + Math.abs(dy) + Math.abs(dz);
+  if (magnitude < params.shakeThreshold) return;
+
+  if (now - shake.windowStart > 500) {
+    shake.windowStart = now;
+    shake.hits = 0;
+  }
+
+  shake.hits += 1;
+
+  if (
+    shake.hits >= params.shakeHitsNeeded &&
+    now - shake.lastSpawnAt > params.shakeCooldown
+  ) {
+    shake.lastSpawnAt = now;
+    shake.hits = 0;
+    spawnShapesFromTop(params.shakeSpawnCount);
+  }
 }
 
 function clearShapes() {
@@ -393,18 +484,21 @@ function onDeviceOrientationAbsolute(e) {
 
 function onDeviceMotion(e) {
   if (!usingDeviceTilt) return;
+
+  // Always watch for shakes (even when iOS tilt uses orientation)
+  detectShake(e);
+
   const acc = e.accelerationIncludingGravity;
   if (!acc || (acc.x == null && acc.y == null)) return;
 
-  // Android: accelerometer is the reliable source
+  // Android: accelerometer is the reliable source for tilt
   if (preferMotion) {
     sensorMode = "motion";
     setTiltTargetsFromMotion(acc.x || 0, acc.y || 0);
     return;
   }
 
-  // iOS: orientation wins (motion Y is inverted vs Android and was
-  // sending shapes to the top). Motion is only a fallback.
+  // iOS: orientation wins for tilt; motion is only a gravity fallback
   if (sensorMode === "orientation") return;
 
   sensorMode = "motion";
