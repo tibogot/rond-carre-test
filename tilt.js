@@ -214,7 +214,8 @@ function setTiltTargetsFromOrientation(beta, gamma) {
   const dg = g - calib.gamma;
   const sens = params.tiltSensitivity;
 
-  tilt.targetX = clamp(-dg / sens, -1.6, 1.6);
+  // gamma sign differs on iOS vs Android for the same physical lean
+  tilt.targetX = clamp((isIOS ? dg : -dg) / sens, -1.6, 1.6);
   // Keep screen-"down" as baseline, then add forward/back lean
   tilt.targetY = clamp(1 + db / sens, -1.6, 1.6);
   lastSensorAt = performance.now();
@@ -231,13 +232,13 @@ function setTiltTargetsFromMotion(ax, ay) {
   const g = 9.81;
   // Android: +Y ≈ upright, X flipped to match lean direction
   // iOS:    Y is inverted vs Android for the same physical tilt
-  let x = isIOS ? ax / g : -(ax / g);
+  let x = -(ax / g);
   let y = isIOS ? -(ay / g) : ay / g;
 
   if (Math.hypot(ax / g, ay / g) < 0.15) {
     const dx = (ax - calib.ax) / g;
     const dy = (ay - calib.ay) / g;
-    x = isIOS ? dx : -dx;
+    x = -dx;
     y = isIOS ? 1 - dy : 1 + dy;
   }
 
