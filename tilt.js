@@ -36,9 +36,9 @@ const params = {
   antiAlign: true,
   antiAlignTorque: 0.004,
   useMouseTilt: true,
-  shakeThreshold: 14,
-  shakeHitsNeeded: 2,
-  shakeCooldown: 850,
+  shakeThreshold: 6,
+  shakeHitsNeeded: 1,
+  shakeCooldown: 700,
   shakeSpawnCount: 4,
   maxShapes: 36,
 };
@@ -79,6 +79,9 @@ const shake = {
   lastGX: 0,
   lastGY: 0,
   lastGZ: 0,
+  lastBeta: null,
+  lastGamma: null,
+  primed: false,
   hits: 0,
   windowStart: 0,
   lastSpawnAt: 0,
@@ -206,53 +209,18 @@ function spawnShape(x, y, options = {}) {
 function spawnShapesFromTop(count) {
   const n = Math.min(count, Math.max(0, params.maxShapes - shapes.length));
   for (let i = 0; i < n; i++) {
-    const size = sizeForKind("circle");
+    const size = sizeForKind(Math.random() < params.circleRatio ? "circle" : "square");
     const x = size / 2 + 8 + Math.random() * Math.max(1, width - size - 16);
-    const y = -size - 20 - Math.random() * 120;
+    // Inside the box, near the top edge (ceiling blocks anything above y≈0)
+    const y = size / 2 + 12 + Math.random() * 36;
     spawnShape(x, y, { fromTop: true });
   }
 }
 
-function detectShake(e) {
-  if (!usingDeviceTilt) return;
-
+function registerShakeHit() {
   const now = performance.now();
-  const acc = e.acceleration;
-  const ag = e.accelerationIncludingGravity;
 
-  let dx = 0;
-  let dy = 0;
-  let dz = 0;
-
-  // Prefer acceleration without gravity when the browser provides it
-  if (acc && (acc.x != null || acc.y != null || acc.z != null)) {
-    const x = acc.x || 0;
-    const y = acc.y || 0;
-    const z = acc.z || 0;
-    dx = x - shake.lastX;
-    dy = y - shake.lastY;
-    dz = z - shake.lastZ;
-    shake.lastX = x;
-    shake.lastY = y;
-    shake.lastZ = z;
-  } else if (ag && (ag.x != null || ag.y != null || ag.z != null)) {
-    const x = ag.x || 0;
-    const y = ag.y || 0;
-    const z = ag.z || 0;
-    dx = x - shake.lastGX;
-    dy = y - shake.lastGY;
-    dz = z - shake.lastGZ;
-    shake.lastGX = x;
-    shake.lastGY = y;
-    shake.lastGZ = z;
-  } else {
-    return;
-  }
-
-  const magnitude = Math.abs(dx) + Math.abs(dy) + Math.abs(dz);
-  if (magnitude < params.shakeThreshold) return;
-
-  if (now - shake.windowStart > 500) {
+  if (now - shake.windowStart > 600) {
     shake.windowStart = now;
     shake.hits = 0;
   }
@@ -267,6 +235,68 @@ function detectShake(e) {
     shake.hits = 0;
     spawnShapesFromTop(params.shakeSpawnCount);
   }
+}
+
+function detectShake(e) {
+  if (!usingDeviceTilt) return;
+
+  const acc = e.acceleration;
+  const ag = e.accelerationIncludingGravity;
+  let intensity = 0;
+
+  // Linear acceleration (no gravity) — best shake signal when available
+  if (acc && (acc.x != null || acc.y != null || acc.z != null)) {
+    const x = acc.x || 0;
+    const y = acc.y || 0;
+    const z = acc.z || 0;
+    intensity = Math.hypot(x, y, z);
+    shake.lastX = x;
+    shake.lastY = y;
+    shake.lastZ = z;
+  } else if (ag && (ag.x != null || ag.y != null || ag.z != null)) {
+    // Fallback: sudden change in gravity vector (works on iOS Safari)
+    const x = ag.x || 0;
+    const y = ag.y || 0;
+    const z = ag.z || 0;
+
+    if (!shake.primed) {
+      shake.lastGX = x;
+      shake.lastGY = y;
+      shake.lastGZ = z;
+      shake.primed = true;
+      return;
+    }
+
+    const jerk = Math.hypot(x - shake.lastGX, y - shake.lastGY, z - shake.lastGZ);
+    const gravityDev = Math.abs(Math.hypot(x, y, z) - 9.81);
+    intensity = Math.max(jerk, gravityDev);
+    shake.lastGX = x;
+    shake.lastGY = y;
+    shake.lastGZ = z;
+  } else {
+    return;
+  }
+
+  if (intensity >= params.shakeThreshold) {
+    registerShakeHit();
+  }
+}
+
+function detectOrientationShake(beta, gamma) {
+  if (!usingDeviceTilt || beta == null || gamma == null) return;
+
+  if (shake.lastBeta == null || shake.lastGamma == null) {
+    shake.lastBeta = beta;
+    shake.lastGamma = gamma;
+    return;
+  }
+
+  const jump = Math.abs(beta - shake.lastBeta) + Math.abs(gamma - shake.lastGamma);
+  shake.lastBeta = beta;
+  shake.lastGamma = gamma;
+
+  // Sudden orientation jumps while shaking the phone
+  if (jump > 18) registerShakeHit();
 }
 
 function clearShapes() {
@@ -310,6 +340,7 @@ function setTiltTargetsFromOrientation(beta, gamma) {
   // Keep screen-"down" as baseline, then add forward/back lean
   tilt.targetY = clamp(1 + db / sens, -1.6, 1.6);
   lastSensorAt = performance.now();
+  detectOrientationShake(b, g);
 }
 
 function setTiltTargetsFromMotion(ax, ay) {
@@ -541,6 +572,10 @@ async function enableTilt() {
     calib.ready = false;
     sensorMode = "none";
     lastSensorAt = 0;
+    shake.primed = false;
+    shake.hits = 0;
+    shake.lastBeta = null;
+    shake.lastGamma = null;
     usingDeviceTilt = true;
     tiltEnabled = true;
     attachSensors();
