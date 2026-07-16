@@ -55,6 +55,9 @@ let tiltEnabled = false;
 let usingDeviceTilt = false;
 let sensorMode = "none"; // orientation | motion | none
 let lastSensorAt = 0;
+const isIOS =
+  /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+  (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 const preferMotion = /Android/i.test(navigator.userAgent);
 const calib = {
   ready: false,
@@ -218,7 +221,7 @@ function setTiltTargetsFromOrientation(beta, gamma) {
 }
 
 function setTiltTargetsFromMotion(ax, ay) {
-  // accelerationIncludingGravity — works more reliably on Android Chrome
+  // accelerationIncludingGravity — axis signs differ on iOS vs Android
   if (!calib.ready) {
     calib.ax = ax;
     calib.ay = ay;
@@ -226,15 +229,16 @@ function setTiltTargetsFromMotion(ax, ay) {
   }
 
   const g = 9.81;
-  // Absolute device gravity projected on screen axes (portrait)
-  // Negate X so tilting the phone left sends shapes left
-  let x = -(ax / g);
-  let y = ay / g;
+  // Android: +Y ≈ upright, X flipped to match lean direction
+  // iOS:    Y is inverted vs Android for the same physical tilt
+  let x = isIOS ? ax / g : -(ax / g);
+  let y = isIOS ? -(ay / g) : ay / g;
 
-  // If the signal is tiny, fall back to delta from calibration
   if (Math.hypot(ax / g, ay / g) < 0.15) {
-    x = -((ax - calib.ax) / g);
-    y = 1 + (ay - calib.ay) / g;
+    const dx = (ax - calib.ax) / g;
+    const dy = (ay - calib.ay) / g;
+    x = isIOS ? dx : -dx;
+    y = isIOS ? 1 - dy : 1 + dy;
   }
 
   tilt.targetX = clamp(x * 1.15, -1.6, 1.6);
@@ -374,16 +378,13 @@ function setStatus(text, active = false) {
 function onDeviceOrientation(e) {
   if (!usingDeviceTilt || preferMotion) return;
   if (e.beta == null && e.gamma == null) return;
-  if (sensorMode === "none" || sensorMode === "orientation") {
-    sensorMode = "orientation";
-    setTiltTargetsFromOrientation(e.beta, e.gamma);
-  }
+  sensorMode = "orientation";
+  setTiltTargetsFromOrientation(e.beta, e.gamma);
 }
 
 function onDeviceOrientationAbsolute(e) {
   if (!usingDeviceTilt || preferMotion) return;
   if (e.beta == null && e.gamma == null) return;
-  if (sensorMode === "motion") return;
   sensorMode = "orientation";
   setTiltTargetsFromOrientation(e.beta, e.gamma);
 }
@@ -393,13 +394,16 @@ function onDeviceMotion(e) {
   const acc = e.accelerationIncludingGravity;
   if (!acc || (acc.x == null && acc.y == null)) return;
 
-  if (
-    !preferMotion &&
-    sensorMode === "orientation" &&
-    performance.now() - lastSensorAt < 200
-  ) {
+  // Android: accelerometer is the reliable source
+  if (preferMotion) {
+    sensorMode = "motion";
+    setTiltTargetsFromMotion(acc.x || 0, acc.y || 0);
     return;
   }
+
+  // iOS: orientation wins (motion Y is inverted vs Android and was
+  // sending shapes to the top). Motion is only a fallback.
+  if (sensorMode === "orientation") return;
 
   sensorMode = "motion";
   setTiltTargetsFromMotion(acc.x || 0, acc.y || 0);
