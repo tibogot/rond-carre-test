@@ -1,0 +1,6 @@
+{
+  "rewrites": [
+    { "source": "/tilt", "destination": "/tilt.html" },
+    { "source": "/gallery", "destination": "/gallery.html" }
+  ]
+}
