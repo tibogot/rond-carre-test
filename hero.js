@@ -8,12 +8,32 @@ const WALL_THICKNESS = 160;
 // so a circle doesn't look smaller than a square of the same "size".
 const OPTICAL_CIRCLE_SCALE = Math.sqrt(4 / Math.PI);
 
-const params = {
+const DESKTOP = {
   shapeSize: 140,
   shapeCount: 70,
+  circleSegments: 64,
+  repelRadius: 400,
+  repelStrength: 0.4,
+  rainHeight: 600,
+  spawnStagger: 4000,
+};
+
+const MOBILE = {
+  shapeSize: 78,
+  shapeCount: 42,
+  circleSegments: 36,
+  repelRadius: 240,
+  repelStrength: 0.45,
+  rainHeight: 420,
+  spawnStagger: 3200,
+};
+
+const params = {
+  shapeSize: DESKTOP.shapeSize,
+  shapeCount: DESKTOP.shapeCount,
   circleRatio: 0.5,
   opticalCircleScale: OPTICAL_CIRCLE_SCALE,
-  circleSegments: 64,
+  circleSegments: DESKTOP.circleSegments,
   color: "#ffd600",
   gravity: 1.15,
   restitution: 0.45,
@@ -22,11 +42,11 @@ const params = {
   density: 0.002,
   antiAlign: true,
   antiAlignTorque: 0.0035,
-  repelRadius: 400,
-  repelStrength: 0.4,
+  repelRadius: DESKTOP.repelRadius,
+  repelStrength: DESKTOP.repelStrength,
   showRepelAura: true,
-  spawnStagger: 4000,
-  rainHeight: 600,
+  spawnStagger: DESKTOP.spawnStagger,
+  rainHeight: DESKTOP.rainHeight,
   rainDrift: 0.12,
   clickSpawn: 3,
 };
@@ -37,6 +57,7 @@ const ctx = canvas.getContext("2d");
 let width = 0;
 let height = 0;
 let dpr = 1;
+let isMobile = false;
 
 const mouse = { x: -9999, y: -9999, active: false };
 const shapes = [];
@@ -51,6 +72,33 @@ let leftWall = null;
 let rightWall = null;
 let ceiling = null;
 let spawnTimeouts = [];
+let guiRef = null;
+
+function detectMobile() {
+  return (
+    window.matchMedia("(max-width: 768px)").matches ||
+    (window.matchMedia("(pointer: coarse)").matches && window.innerWidth < 1000)
+  );
+}
+
+function applyDeviceDefaults(force = false) {
+  const nextMobile = detectMobile();
+  if (!force && nextMobile === isMobile) return false;
+  isMobile = nextMobile;
+
+  const preset = isMobile ? MOBILE : DESKTOP;
+  params.shapeSize = preset.shapeSize;
+  params.shapeCount = preset.shapeCount;
+  params.circleSegments = preset.circleSegments;
+  params.repelRadius = preset.repelRadius;
+  params.repelStrength = preset.repelStrength;
+  params.rainHeight = preset.rainHeight;
+  params.spawnStagger = preset.spawnStagger;
+  params.showRepelAura = !isMobile;
+  params.clickSpawn = isMobile ? 2 : 3;
+
+  return true;
+}
 
 function clearSpawnTimeouts() {
   spawnTimeouts.forEach(clearTimeout);
@@ -58,7 +106,7 @@ function clearSpawnTimeouts() {
 }
 
 function resize() {
-  dpr = Math.min(window.devicePixelRatio || 1, 2);
+  dpr = Math.min(window.devicePixelRatio || 1, isMobile ? 1.75 : 2);
   width = window.innerWidth;
   height = window.innerHeight;
   canvas.width = Math.floor(width * dpr);
@@ -122,14 +170,19 @@ function spawnShape(x, y, options = {}) {
     density: params.density,
   };
 
-  // Start fully above the viewport so nothing peeks in before the drop
   const startY = rain
     ? -(size / 2 + 24 + Math.random() * params.rainHeight)
     : y;
 
   let body;
   if (kind === "circle") {
-    body = Bodies.circle(x, startY, size / 2, bodyOptions, params.circleSegments);
+    body = Bodies.circle(
+      x,
+      startY,
+      size / 2,
+      bodyOptions,
+      params.circleSegments
+    );
   } else {
     body = Bodies.rectangle(x, startY, size, size, bodyOptions);
     Body.setAngle(body, Math.random() * Math.PI * 2);
@@ -138,9 +191,11 @@ function spawnShape(x, y, options = {}) {
   const shape = { body, kind, size, hidden: false };
 
   if (rain) {
-    // Hold off-screen, invisible, until its rain drop time
     Body.setStatic(body, true);
-    Body.setPosition(body, { x, y: -(size / 2 + 24) - params.rainHeight - 200 });
+    Body.setPosition(body, {
+      x,
+      y: -(size / 2 + 24) - params.rainHeight - 200,
+    });
     Body.setVelocity(body, { x: 0, y: 0 });
     Body.setAngularVelocity(body, 0);
     shape.hidden = true;
@@ -233,7 +288,6 @@ function applyRepulsion() {
   }
 }
 
-// Nudge near-resting squares away from 0° / 90° so they don't tile into a flat bar
 function applyAntiAlign() {
   if (!params.antiAlign) return;
 
@@ -292,7 +346,6 @@ function drawShapes() {
     ctx.lineWidth = 1.5;
 
     if (kind === "circle") {
-      // Perfect visual circle (physics already uses high segment count)
       ctx.beginPath();
       ctx.arc(body.position.x, body.position.y, size / 2, 0, Math.PI * 2);
       ctx.fill();
@@ -333,10 +386,18 @@ Runner.run(runner, engine);
   requestAnimationFrame(loop);
 })();
 
-function onPointerMove(e) {
+function pointerPos(e) {
   const rect = canvas.getBoundingClientRect();
-  mouse.x = e.clientX - rect.left;
-  mouse.y = e.clientY - rect.top;
+  return {
+    x: e.clientX - rect.left,
+    y: e.clientY - rect.top,
+  };
+}
+
+function onPointerMove(e) {
+  const pos = pointerPos(e);
+  mouse.x = pos.x;
+  mouse.y = pos.y;
   mouse.active = true;
 }
 
@@ -346,38 +407,77 @@ function onPointerLeave() {
   mouse.y = -9999;
 }
 
-canvas.addEventListener("pointermove", onPointerMove);
-canvas.addEventListener("pointerdown", onPointerMove);
+canvas.addEventListener(
+  "pointerdown",
+  (e) => {
+    if (e.target.closest?.(".lil-gui")) return;
+    canvas.setPointerCapture(e.pointerId);
+    onPointerMove(e);
+
+    const maxShapes = Math.max(params.shapeCount + 40, isMobile ? 90 : 160);
+    if (shapes.length < maxShapes) {
+      const pos = pointerPos(e);
+      for (let i = 0; i < params.clickSpawn; i++) {
+        spawnShape(
+          pos.x + (Math.random() - 0.5) * params.shapeSize,
+          -sizeForKind("circle") - Math.random() * 80,
+          { rain: false }
+        );
+      }
+    }
+
+    e.preventDefault();
+  },
+  { passive: false }
+);
+
+canvas.addEventListener(
+  "pointermove",
+  (e) => {
+    onPointerMove(e);
+    e.preventDefault();
+  },
+  { passive: false }
+);
+
+canvas.addEventListener("pointerup", onPointerLeave);
+canvas.addEventListener("pointercancel", onPointerLeave);
 canvas.addEventListener("pointerleave", onPointerLeave);
 window.addEventListener("blur", onPointerLeave);
 
 let resizeTimer = null;
-window.addEventListener("resize", () => {
+function onViewportChange() {
   clearTimeout(resizeTimer);
   resizeTimer = setTimeout(() => {
+    const deviceChanged = applyDeviceDefaults();
     resize();
+    if (deviceChanged) {
+      syncGuiControllers();
+    }
     seedShapes();
   }, 150);
-});
+}
 
-canvas.addEventListener("pointerdown", (e) => {
-  if (e.target.closest?.(".lil-gui")) return;
-  const maxShapes = Math.max(params.shapeCount + 40, 160);
-  if (shapes.length >= maxShapes) return;
+window.addEventListener("resize", onViewportChange);
+window.visualViewport?.addEventListener("resize", onViewportChange);
 
-  const rect = canvas.getBoundingClientRect();
-  const x = e.clientX - rect.left;
-  for (let i = 0; i < params.clickSpawn; i++) {
-    spawnShape(
-      x + (Math.random() - 0.5) * params.shapeSize,
-      -sizeForKind("circle") - Math.random() * 80,
-      { rain: false }
-    );
-  }
-});
+function syncGuiControllers() {
+  if (!guiRef) return;
+  guiRef.controllersRecursive().forEach((c) => c.updateDisplay());
+}
 
 function setupGUI() {
+  const showDev =
+    new URLSearchParams(window.location.search).has("dev") || !isMobile;
+
+  if (!showDev) return;
+
   const gui = new GUI({ title: "Dev Controls" });
+  guiRef = gui;
+
+  if (isMobile) {
+    gui.close();
+  }
 
   const shapesFolder = gui.addFolder("Shapes");
   shapesFolder
@@ -462,6 +562,7 @@ function setupGUI() {
   mouseFolder.open();
 }
 
+applyDeviceDefaults(true);
 resize();
 seedShapes();
 setupGUI();
