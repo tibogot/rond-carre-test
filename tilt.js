@@ -211,7 +211,7 @@ function setTiltTargetsFromOrientation(beta, gamma) {
   const dg = g - calib.gamma;
   const sens = params.tiltSensitivity;
 
-  tilt.targetX = clamp(dg / sens, -1.6, 1.6);
+  tilt.targetX = clamp(-dg / sens, -1.6, 1.6);
   // Keep screen-"down" as baseline, then add forward/back lean
   tilt.targetY = clamp(1 + db / sens, -1.6, 1.6);
   lastSensorAt = performance.now();
@@ -227,12 +227,13 @@ function setTiltTargetsFromMotion(ax, ay) {
 
   const g = 9.81;
   // Absolute device gravity projected on screen axes (portrait)
-  let x = ax / g;
+  // Negate X so tilting the phone left sends shapes left
+  let x = -(ax / g);
   let y = ay / g;
 
   // If the signal is tiny, fall back to delta from calibration
-  if (Math.hypot(x, y) < 0.15) {
-    x = (ax - calib.ax) / g;
+  if (Math.hypot(ax / g, ay / g) < 0.15) {
+    x = -((ax - calib.ax) / g);
     y = 1 + (ay - calib.ay) / g;
   }
 
